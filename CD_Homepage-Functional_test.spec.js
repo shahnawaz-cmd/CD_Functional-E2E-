@@ -17,6 +17,16 @@ class DataGenerator {
     }
     return vin.join('');
   }
+
+  static getUniqueEmail() {
+    return `test_${Date.now()}@pintonaturals.com`;
+  }
+
+  static getCards() {
+    return {
+      success: { number: '4242424242424242', expiry: '12/26', cvc: '123' }
+    };
+  }
 }
 
 class CouponSwapTests {
@@ -79,24 +89,12 @@ class VIN_Decoder {
     this.page = page;
   }
 
-  /**
-   * Case 2: VIN decode (mapped VN)
-   * Performs VIN decoding by filling the VIN input and clicking the decode button.
-   * Returns timing and resulting URL.
-   */
-  /**
-   * Case 2: VIN decode (mapped VN)
-   * Performs VIN decoding by filling the VIN input, clicking the decode button,
-   * waiting for the decode API POST request, then waiting for the preview page
-   * where an "Add to garage" button appears. Returns timing, URL, API payload and response.
-   */
   async VIN_decode(vin) {
     const start = Date.now();
     const vinInput = this.page.getByRole('textbox', { name: 'Your 5-13 digit VIN *' });
     await vinInput.click();
     await vinInput.fill(vin);
 
-    // Use Promise.all to handle the click and waits concurrently
     const [apiResponse] = await Promise.all([
       this.page.waitForResponse(
         resp => resp.url().includes('/api/classic/decode') && resp.request().method() === 'POST',
@@ -106,7 +104,6 @@ class VIN_Decoder {
       this.page.waitForSelector('button:has-text("Add to garage")', { timeout: 30000 })
     ]);
 
-    // Ensure we are on the preview page before continuing
     await expect(this.page.locator('button:has-text("Add to garage")')).toBeVisible();
 
     let updateApiResponse = null;
@@ -128,7 +125,6 @@ class VIN_Decoder {
       await this.page.getByRole('combobox').filter({ hasText: 'Trim' }).click();
       await this.page.getByRole('button', { name: 'Base' }).click();
       
-      // Capture the update API call
       [updateApiResponse] = await Promise.all([
         this.page.waitForResponse(
           resp => resp.url().includes('update-classic-decode') && resp.request().method() === 'POST',
@@ -141,11 +137,8 @@ class VIN_Decoder {
     const end = Date.now();
     const url = this.page.url();
 
-    // Extract payload & response for initial decode
     const decodePayload = apiResponse?.request().postData() ?? null;
     const decodeResponse = apiResponse ? await apiResponse.json() : null;
-
-    // Extract payload & response for update
     const updatePayload = updateApiResponse?.request().postData() ?? null;
     const updateResponse = updateApiResponse ? await updateApiResponse.json() : null;
 
@@ -162,26 +155,95 @@ class VIN_Decoder {
     };
   }
 
-  // Alias for backward compatibility
   async decodeVIN(vin) {
     return this.VIN_decode(vin);
   }
-
 }
 
+class CheckoutManager {
+  constructor(page) {
+    this.page = page;
+    this.historyButton = page.getByRole('button', { name: /Access Vehicle History/i });
+    this.emailInput = page.getByRole('textbox', { name: /Email Address/i });
+    this.checkoutButton = page.getByRole('button', { name: /Proceed to Checkout/i });
+    this.preloader = page.locator('text=Preparing Your Checkout');
+    this.nameInput = page.getByRole('textbox', { name: /Enter your name/i });
+    this.zipInput = page.getByRole('textbox', { name: /ZIP \/ Postal Code/i });
+    this.payButton = page.getByRole('button', { name: /Pay \$/i });
+  }
+
+  async performPreloaderFlow(email) {
+    await test.step('Perform Preloader flow', async () => {
+      const searchingIndicator = this.page.getByAltText('Searching');
+      await expect(searchingIndicator).not.toBeVisible({ timeout: 60000 });
+      await this.historyButton.waitFor({ state: 'visible', timeout: 60000 });
+      await this.historyButton.click();
+      await expect(this.emailInput).toBeVisible({ timeout: 15000 });
+      await this.emailInput.fill(email);
+      await this.checkoutButton.click();
+      
+      await this.preloader.waitFor({ state: 'visible', timeout: 30000 });
+      await this.page.waitForURL('**/checkout**', { timeout: 90000 });
+      console.log('✅ Navigated to Checkout');
+    });
+  }
+
+  async fillStripeDetails(card) {
+    const cardFrame = this.page.frameLocator('iframe[title*="Secure card number input frame"]');
+    await cardFrame.locator('body').waitFor({ state: 'attached', timeout: 15000 });
+    await cardFrame.getByRole('textbox', { name: /Card number/i }).fill(card.number);
+
+    const expiryFrame = this.page.frameLocator('iframe[title*="Secure expiration date input frame"]');
+    await expiryFrame.locator('body').waitFor({ state: 'attached', timeout: 15000 });
+    await expiryFrame.getByRole('textbox', { name: /Expiration date/i }).fill(card.expiry);
+
+    const cvcFrame = this.page.frameLocator('iframe[title*="Secure CVC input frame"]');
+    await cvcFrame.locator('body').waitFor({ state: 'attached', timeout: 15000 });
+    await cvcFrame.getByRole('textbox', { name: /CVC/i }).fill(card.cvc);
+  }
+
+  async performCheckout(name, zip, card) {
+    await test.step('Perform Stripe Checkout', async () => {
+      await expect(this.nameInput).toBeVisible({ timeout: 15000 });
+      await this.nameInput.fill(name);
+      await this.fillStripeDetails(card);
+      await this.zipInput.fill(zip);
+      await expect(this.payButton).toBeEnabled({ timeout: 20000 });
+      await this.payButton.click();
+    });
+  }
+
+  async verifySuccess() {
+    await test.step('Verify Redirection to CDMA', async () => {
+      await this.page.waitForURL(/.*(generate=true&paid=true|members\/my-reports).*/, { timeout: 60000 });
+      console.log(`🎉 Success: ${this.page.url()}`);
+    });
+  }
+}
 
 test.describe('Coupon Workflow and Cookie Verification', () => {
   test('Case 1: Coupon swap logic', async ({ page }) => {
-  const couponSwap = new CouponSwapTests(page);
-  // Applying get20 (20% / 20) and then swapping to testing (96% / 96)
-  await couponSwap.runCouponSwapCase('get20', '20%', '20', 'testing', '96%', '96');
+    const couponSwap = new CouponSwapTests(page);
+    await couponSwap.runCouponSwapCase('get20', '20%', '20', 'testing', '96%', '96');
+    await page.close();
+  });
 
-  // VIN decoding after coupon workflow
-  const vin = DataGenerator.getRandomVIN();
-  const decoder = new VIN_Decoder(page);
-  const result = await decoder.decodeVIN(vin);
-  console.log(`VIN decode took ${result.durationSec}s, navigated to ${result.url}`);
-  console.log(`Captured API data:`, JSON.stringify(result, null, 2));
-  await page.close();
-});
+  test('Case 2: Full E2E VHR Checkout flow', async ({ page }) => {
+    const couponSwap = new CouponSwapTests(page);
+    // Initial setup with coupon
+    await couponSwap.runCouponSwapCase('get20', '20%', '20', 'testing', '96%', '96');
+
+    // VIN Decode
+    const vin = DataGenerator.getRandomVIN();
+    const decoder = new VIN_Decoder(page);
+    await decoder.decodeVIN(vin);
+
+    // Checkout Flow
+    const checkout = new CheckoutManager(page);
+    await checkout.performPreloaderFlow(DataGenerator.getUniqueEmail());
+    await checkout.performCheckout('Shahnawaz', '26556', DataGenerator.getCards().success);
+    await checkout.verifySuccess();
+    
+    await page.close();
+  });
 });
